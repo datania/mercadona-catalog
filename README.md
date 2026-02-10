@@ -17,6 +17,12 @@ Descargar:
 make data
 ```
 
+El script también se puede ejecutar directamente:
+
+```bash
+uv run mercadona.py --help
+```
+
 Subir a Hugging Face:
 
 ```bash
