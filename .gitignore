@@ -3,4 +3,7 @@ __pycache__/
 .ruff_cache/
 .DS_Store
 *.tmp
-data/
+
+# Keep dataset card tracked. Ignore downloaded data.
+data/*
+!data/README.md
