@@ -64,12 +64,26 @@ HTML_TEMPLATE = """<!doctype html>
       margin-bottom: 10px;
     }
 
+    #legendBox { margin-top: 8px; }
+    #legendBox > summary {
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 650;
+      color: #222;
+      user-select: none;
+    }
+    #legendBox[open] > summary { margin-bottom: 8px; }
+
     #legend { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px 10px; align-items: center; }
     .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.15); }
     .cat { font-size: 12px; color: #222; }
     .count { font-variant-numeric: tabular-nums; font-size: 12px; color: #555; }
 
     #stats { margin-top: 10px; font-size: 12px; color: #555; }
+
+    @media (max-width: 520px) {
+      #hud { width: calc(100vw - 24px); }
+    }
 
     #tooltip {
       position: fixed;
@@ -98,7 +112,10 @@ HTML_TEMPLATE = """<!doctype html>
     <div id=\"title\">Mercadona en 2D</div>
     <div id=\"subtitle\">Embedding 2D (t-SNE) a partir del texto del producto (nombre, descripción, categoría, marca). Pasa el ratón para ver detalles. Click para abrir el producto.</div>
     <input id=\"search\" placeholder=\"Buscar por nombre…\" autocomplete=\"off\" />
-    <div id=\"legend\"></div>
+    <details id=\"legendBox\" open>
+      <summary>Leyenda</summary>
+      <div id=\"legend\"></div>
+    </details>
     <div id=\"stats\"></div>
   </div>
 
@@ -112,6 +129,7 @@ HTML_TEMPLATE = """<!doctype html>
     const POINTS = JSON.parse(document.getElementById('points').textContent);
     const CATEGORIES = JSON.parse(document.getElementById('categories').textContent);
 
+    const elLegendBox = document.getElementById('legendBox');
     const elLegend = document.getElementById('legend');
     const elStats = document.getElementById('stats');
     const elSearch = document.getElementById('search');
@@ -192,6 +210,10 @@ HTML_TEMPLATE = """<!doctype html>
     let hoveredId = null;
     let filteredPoints = getFilteredPoints();
 
+    if (window.matchMedia && window.matchMedia('(max-width: 520px)').matches) {
+      elLegendBox.removeAttribute('open');
+    }
+
     renderLegend();
     updateStats(filteredPoints);
 
@@ -203,20 +225,26 @@ HTML_TEMPLATE = """<!doctype html>
       getPosition: d => [d.x, d.y],
       getRadius: d => (d.id === hoveredId ? 0.62 : 0.40),
       radiusUnits: 'common',
-      radiusMinPixels: 1.9,
+      radiusMinPixels: 2.2,
       radiusMaxPixels: 20,
       getFillColor: d => d.color,
       opacity: 0.9,
       onHover: info => {
-        const nextHoveredId = info.object ? info.object.id : null;
+        const picked = deckgl.pickObject({ x: info.x, y: info.y, radius: 14, layerIds: ['products'] });
+        const obj = picked && picked.object ? picked.object : null;
+
+        const nextHoveredId = obj ? obj.id : null;
         if (nextHoveredId !== hoveredId) {
           hoveredId = nextHoveredId;
           deckgl.setProps({ layers: [layer()] });
         }
-        showTooltip(info);
+
+        showTooltip({ x: info.x, y: info.y, object: obj });
       },
       onClick: info => {
-        if (info.object && info.object.url) window.open(info.object.url, '_blank', 'noopener');
+        const picked = deckgl.pickObject({ x: info.x, y: info.y, radius: 14, layerIds: ['products'] });
+        const obj = picked && picked.object ? picked.object : null;
+        if (obj && obj.url) window.open(obj.url, '_blank', 'noopener');
       }
     });
 
