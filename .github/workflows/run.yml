@@ -1,0 +1,27 @@
+name: Run
+
+on:
+  schedule:
+    - cron: "0 0 * * 1" # weekly (Monday)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Download data
+        run: make data
+
+      - name: Upload dataset
+        env:
+          HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: make upload

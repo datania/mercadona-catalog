@@ -1,0 +1,12 @@
+[project]
+name = "mercadona-catalog"
+version = "0.1.0"
+description = "Download Mercadona online store catalog JSON and upload to Hugging Face"
+readme = "README.md"
+authors = [
+    { name = "David Gasquez", email = "davidgasquez@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+]
