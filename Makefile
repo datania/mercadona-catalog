@@ -10,7 +10,7 @@ help:
 	@uv -V || echo 'Please install uv: https://docs.astral.sh/uv/getting-started/installation/'
 
 data: .uv
-	uv run mercadona_cache.py
+	uv run mercadona.py
 
 upload:
 	uvx --from "huggingface_hub[hf_xet]" hf upload-large-folder \
