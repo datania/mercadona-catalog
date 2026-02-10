@@ -135,6 +135,10 @@ HTML_TEMPLATE = """<!doctype html>
     const elSearch = document.getElementById('search');
     const elTooltip = document.getElementById('tooltip');
 
+    const IS_TOUCH = ('ontouchstart' in window) || ((navigator.maxTouchPoints || 0) > 0);
+    let lastTapAt = 0;
+    let lastTapId = null;
+
     function fmtEur(v) {
       if (v == null || Number.isNaN(v)) return '';
       return new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(v);
@@ -179,6 +183,9 @@ HTML_TEMPLATE = """<!doctype html>
 
       const price = fmtEur(object.price);
       const category = object.top_category || '';
+      const hint = IS_TOUCH
+        ? '<div class="meta" style="margin-top:6px;opacity:0.75;">Doble toque para abrir</div>'
+        : '';
 
       elTooltip.innerHTML = `
         <div class="row">
@@ -186,6 +193,7 @@ HTML_TEMPLATE = """<!doctype html>
           <div>
             <div class="name">${object.name}</div>
             <div class="meta">${category}${price ? ` · ${price}` : ''}</div>
+            ${hint}
           </div>
         </div>
       `;
@@ -244,7 +252,24 @@ HTML_TEMPLATE = """<!doctype html>
       onClick: info => {
         const picked = deckgl.pickObject({ x: info.x, y: info.y, radius: 14, layerIds: ['products'] });
         const obj = picked && picked.object ? picked.object : null;
-        if (obj && obj.url) window.open(obj.url, '_blank', 'noopener');
+        if (!obj) return;
+
+        if (IS_TOUCH) {
+          const now = Date.now();
+          if (lastTapId === obj.id && (now - lastTapAt) < 450) {
+            lastTapId = null;
+            lastTapAt = 0;
+            if (obj.url) window.open(obj.url, '_blank', 'noopener');
+            return;
+          }
+
+          lastTapId = obj.id;
+          lastTapAt = now;
+          showTooltip({ x: info.x, y: info.y, object: obj });
+          return;
+        }
+
+        if (obj.url) window.open(obj.url, '_blank', 'noopener');
       }
     });
 
