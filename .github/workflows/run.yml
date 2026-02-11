@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   export:
@@ -21,7 +21,23 @@ jobs:
       - name: Download data
         run: make data
 
+      - name: Build index.html
+        run: make index
+
       - name: Upload dataset
         env:
           HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
         run: make upload
+
+      - name: Commit index.html updates
+        run: |
+          if git diff --quiet -- index.html; then
+            echo "No index.html changes"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "🤖 Update index.html"
+          git push

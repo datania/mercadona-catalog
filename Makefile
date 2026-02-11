@@ -1,8 +1,9 @@
-.PHONY: data upload clean help
+.PHONY: data index upload clean help
 
 help:
 	@echo "Targets:"
 	@echo "  data   - Download Mercadona catalog JSON into data/"
+	@echo "  index  - Build index.html from data/products"
 	@echo "  upload - Upload data/ to Hugging Face dataset datania/mercadona-catalog"
 	@echo "  clean  - Remove data/"
 
@@ -11,6 +12,9 @@ help:
 
 data: .uv
 	uv run mercadona.py
+
+index: .uv
+	uv run --script embed_products.py --products-dir data/products --out index.html
 
 upload:
 	uvx --from "huggingface_hub[hf_xet]" hf upload-large-folder \
