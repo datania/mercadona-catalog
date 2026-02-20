@@ -348,6 +348,7 @@ HTML_TEMPLATE = """<!doctype html>
 
 _WS_RE = re.compile(r"\s+")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_PRICE_RE = re.compile(r"^-?\d+(?:[.,]\d+)?$")
 
 
 @dataclass(frozen=True)
@@ -357,7 +358,7 @@ class ProductRecord:
     top_category: str
     category_path: str
     brand: str
-    price: float
+    price: float | None
     thumbnail: str
     url: str
     text: str
@@ -408,6 +409,21 @@ def _category_path_and_top(prod: dict) -> tuple[str, str]:
     return (" > ".join(best), top)
 
 
+def _parse_price(raw: object) -> float | None:
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+        return value if math.isfinite(value) else None
+
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s or not _PRICE_RE.fullmatch(s):
+            return None
+        value = float(s.replace(",", "."))
+        return value if math.isfinite(value) else None
+
+    return None
+
+
 def _product_to_record(prod: dict) -> ProductRecord:
     pid = str(prod.get("id") or "").strip()
     name = _clean_text(str(prod.get("display_name") or "").strip())
@@ -426,7 +442,7 @@ def _product_to_record(prod: dict) -> ProductRecord:
     brand = _clean_text(prod.get("brand") if isinstance(prod.get("brand"), str) else "")
 
     price_raw = (prod.get("price_instructions") or {}).get("unit_price")
-    price = float(price_raw) if price_raw is not None else math.nan
+    price = _parse_price(price_raw)
 
     thumbnail = str(prod.get("thumbnail") or "").strip()
     url = str(prod.get("share_url") or "").strip()
@@ -611,8 +627,8 @@ def main() -> int:
             }
         )
 
-    points_json = json.dumps(points, ensure_ascii=False, separators=(",", ":"))
-    categories_json = json.dumps(categories, ensure_ascii=False, separators=(",", ":"))
+    points_json = json.dumps(points, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    categories_json = json.dumps(categories, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
     html = (
         HTML_TEMPLATE.replace("__POINTS_JSON__", points_json)
