@@ -28,6 +28,8 @@ class FetchResult:
     path: Path
     status_code: int
     wrote: bool
+    skipped: bool
+    error: str
 
 
 def _parse_args() -> argparse.Namespace:
@@ -135,6 +137,23 @@ def _write_json(path: Path, data: object, *, skip_unchanged: bool) -> bool:
     return True
 
 
+def _retry_backoff_seconds(attempt: int) -> float:
+    return min(5.0, 0.25 * (2 ** (attempt - 1)))
+
+
+def _drop_existing_error_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    if isinstance(payload, dict) and isinstance(payload.get("_error"), str):
+        path.unlink()
+
+
 async def _fetch_json(
     client: httpx.AsyncClient,
     url: str,
@@ -148,28 +167,51 @@ async def _fetch_json(
     for attempt in range(1, retries + 1):
         try:
             resp = await client.get(url)
-            status = resp.status_code
-
-            data: object
-            try:
-                data = resp.json()
-            except Exception:
-                data = {
-                    "_error": "non_json_response",
-                    "status_code": status,
-                    "text": resp.text,
-                }
-
-            wrote = _write_json(out_path, data, skip_unchanged=skip_unchanged)
-            return FetchResult(url=url, path=out_path, status_code=status, wrote=wrote)
         except Exception as e:
             last_exc = e
             if attempt < retries:
-                await asyncio.sleep(min(2.0, 0.25 * (2 ** (attempt - 1))))
+                await asyncio.sleep(_retry_backoff_seconds(attempt))
                 continue
             raise RuntimeError(
                 f"request failed after {retries} attempts: {url}"
             ) from last_exc
+
+        status = resp.status_code
+
+        data: object
+        try:
+            data = resp.json()
+        except Exception:
+            data = {
+                "_error": "non_json_response",
+                "status_code": status,
+                "text": resp.text,
+            }
+
+        if isinstance(data, dict) and isinstance(data.get("_error"), str):
+            error = data["_error"]
+            if attempt < retries:
+                await asyncio.sleep(_retry_backoff_seconds(attempt))
+                continue
+            _drop_existing_error_file(out_path)
+            return FetchResult(
+                url=url,
+                path=out_path,
+                status_code=status,
+                wrote=False,
+                skipped=True,
+                error=error,
+            )
+
+        wrote = _write_json(out_path, data, skip_unchanged=skip_unchanged)
+        return FetchResult(
+            url=url,
+            path=out_path,
+            status_code=status,
+            wrote=wrote,
+            skipped=False,
+            error="",
+        )
 
     raise AssertionError("unreachable")
 
@@ -230,6 +272,15 @@ async def _bounded_gather[T](limit: int, coros: Iterable[Awaitable[T]]) -> list[
     return await asyncio.gather(*tasks)
 
 
+def _format_fetch_result(res: FetchResult, out_dir: Path) -> str:
+    base = f"[{res.status_code}] {res.path.relative_to(out_dir)}"
+    if res.skipped:
+        return f"{base} (skipped: {res.error})"
+    if not res.wrote:
+        return f"{base} (unchanged)"
+    return base
+
+
 async def main() -> int:
     args = _parse_args()
     out_dir: Path = args.out
@@ -259,9 +310,11 @@ async def main() -> int:
             retries=args.retries,
             skip_unchanged=args.skip_unchanged,
         )
-        print(
-            f"[{res.status_code}] {res.path.relative_to(out_dir)}{' (unchanged)' if not res.wrote else ''}"
-        )
+        print(_format_fetch_result(res, out_dir))
+        if res.skipped:
+            raise RuntimeError(
+                f"failed to fetch categories root after {args.retries} attempts: {categories_url}"
+            )
 
         categories_root = json.loads(categories_out.read_text(encoding="utf-8"))
         cat_ids = _iter_second_level_category_ids(categories_root)
@@ -280,14 +333,12 @@ async def main() -> int:
                 retries=args.retries,
                 skip_unchanged=args.skip_unchanged,
             )
-            print(
-                f"[{res.status_code}] {res.path.relative_to(out_dir)}{' (unchanged)' if not res.wrote else ''}"
-            )
+            print(_format_fetch_result(res, out_dir))
 
             if args.delay:
                 await asyncio.sleep(args.delay)
 
-            if res.status_code != 200:
+            if res.skipped or res.status_code != 200:
                 continue
 
             payload = json.loads(out_path.read_text(encoding="utf-8"))
@@ -327,7 +378,8 @@ async def main() -> int:
             results = await _bounded_gather(args.concurrency, coros)
 
         wrote = sum(1 for r in results if r.wrote)
-        print(f"products fetched: {len(results)}, wrote: {wrote}")
+        skipped = sum(1 for r in results if r.skipped)
+        print(f"products fetched: {len(results)}, wrote: {wrote}, skipped: {skipped}")
 
     return 0
 
