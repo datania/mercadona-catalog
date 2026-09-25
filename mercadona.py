@@ -1,15 +1,12 @@
-#!/usr/bin/env python3
-
 import argparse
 import asyncio
 import json
 import os
-from collections.abc import Awaitable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-
 
 API_BASE_URL = "https://tienda.mercadona.es/api"
 DEFAULT_HEADERS = {
@@ -28,8 +25,6 @@ class FetchResult:
     path: Path
     status_code: int
     wrote: bool
-    skipped: bool
-    error: str
 
 
 def _parse_args() -> argparse.Namespace:
@@ -53,14 +48,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--concurrency",
         type=int,
-        default=4,
-        help="Concurrencia para descargas de products/{id} (default: 4)",
+        default=1,
+        help="Concurrencia para descargas de products/{id} (default: 1)",
     )
     p.add_argument(
         "--delay",
         type=float,
-        default=0.2,
-        help="Delay entre requests por worker, segundos (default: 0.2)",
+        default=2.0,
+        help="Delay entre requests por worker, segundos (default: 2)",
     )
     p.add_argument(
         "--retries",
@@ -86,7 +81,10 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="CSV de category ids (2º nivel) a procesar (ej: 112,156)",
     )
-    return p.parse_args()
+    args = p.parse_args()
+    if args.concurrency < 1 or args.retries < 1 or not 0 <= args.delay < float("inf"):
+        p.error("concurrency y retries deben ser >= 1; delay debe ser finito y >= 0")
+    return args
 
 
 def _api_rel_to_out_path(api_rel: str) -> Path:
@@ -138,20 +136,27 @@ def _write_json(path: Path, data: object, *, skip_unchanged: bool) -> bool:
 
 
 def _retry_backoff_seconds(attempt: int) -> float:
-    return min(5.0, 0.25 * (2 ** (attempt - 1)))
+    return min(60.0, 2.0 * (2 ** (attempt - 1)))
 
 
-def _drop_existing_error_file(path: Path) -> None:
-    if not path.exists():
-        return
+def _validate_payload(data: object, url: str) -> None:
+    if not isinstance(data, dict):
+        raise TypeError(f"expected a JSON object: {url}")
+    if "code" in data or "_error" in data:
+        message = data.get("en_message") or data.get("_error") or data.get("code")
+        raise ValueError(f"API error for {url}: {message}")
 
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return
-
-    if isinstance(payload, dict) and isinstance(payload.get("_error"), str):
-        path.unlink()
+    parts = httpx.URL(url).path.rstrip("/").split("/")
+    if parts[-1] == "categories":
+        valid = isinstance(data.get("results"), list) and bool(data["results"])
+    else:
+        valid = str(data.get("id")) == parts[-1]
+        if parts[-2] == "products":
+            valid = valid and bool(data.get("display_name"))
+        else:
+            valid = valid and isinstance(data.get("categories"), list)
+    if not valid:
+        raise ValueError(f"invalid catalog payload: {url}")
 
 
 async def _fetch_json(
@@ -167,7 +172,7 @@ async def _fetch_json(
     for attempt in range(1, retries + 1):
         try:
             resp = await client.get(url)
-        except Exception as e:
+        except httpx.TransportError as e:
             last_exc = e
             if attempt < retries:
                 await asyncio.sleep(_retry_backoff_seconds(attempt))
@@ -177,40 +182,19 @@ async def _fetch_json(
             ) from last_exc
 
         status = resp.status_code
-
-        data: object
-        try:
-            data = resp.json()
-        except Exception:
-            data = {
-                "_error": "non_json_response",
-                "status_code": status,
-                "text": resp.text,
-            }
-
-        if isinstance(data, dict) and isinstance(data.get("_error"), str):
-            error = data["_error"]
-            if attempt < retries:
-                await asyncio.sleep(_retry_backoff_seconds(attempt))
-                continue
-            _drop_existing_error_file(out_path)
-            return FetchResult(
-                url=url,
-                path=out_path,
-                status_code=status,
-                wrote=False,
-                skipped=True,
-                error=error,
-            )
-
+        if status >= 500 and attempt < retries:
+            await asyncio.sleep(_retry_backoff_seconds(attempt))
+            continue
+        # Do not retry blocking responses (including HTTP 200 API errors).
+        resp.raise_for_status()
+        data = resp.json()
+        _validate_payload(data, url)
         wrote = _write_json(out_path, data, skip_unchanged=skip_unchanged)
         return FetchResult(
             url=url,
             path=out_path,
             status_code=status,
             wrote=wrote,
-            skipped=False,
-            error="",
         )
 
     raise AssertionError("unreachable")
@@ -219,7 +203,7 @@ async def _fetch_json(
 def _iter_second_level_category_ids(categories_root: dict) -> list[int]:
     results = categories_root.get("results")
     if not isinstance(results, list):
-        raise ValueError("unexpected categories root payload. Missing 'results'.")
+        raise TypeError("unexpected categories root payload. Missing 'results'.")
 
     ids: list[int] = []
     for top in results:
@@ -261,21 +245,24 @@ def _collect_product_ids_from_category_payload(payload: object) -> set[str]:
     return product_ids
 
 
-async def _bounded_gather[T](limit: int, coros: Iterable[Awaitable[T]]) -> list[T]:
-    sem = asyncio.Semaphore(limit)
+async def _bounded_gather[T, R](
+    limit: int, items: Iterable[T], fetch: Callable[[T], Awaitable[R]]
+) -> list[R]:
+    pending = iter(items)
+    results: list[R] = []
 
-    async def run(coro: Awaitable[T]) -> T:
-        async with sem:
-            return await coro
+    async def worker() -> None:
+        for item in pending:
+            results.append(await fetch(item))
 
-    tasks = [asyncio.create_task(run(c)) for c in coros]
-    return await asyncio.gather(*tasks)
+    async with asyncio.TaskGroup() as group:
+        for _ in range(limit):
+            group.create_task(worker())
+    return results
 
 
 def _format_fetch_result(res: FetchResult, out_dir: Path) -> str:
     base = f"[{res.status_code}] {res.path.relative_to(out_dir)}"
-    if res.skipped:
-        return f"{base} (skipped: {res.error})"
     if not res.wrote:
         return f"{base} (unchanged)"
     return base
@@ -311,10 +298,6 @@ async def main() -> int:
             skip_unchanged=args.skip_unchanged,
         )
         print(_format_fetch_result(res, out_dir))
-        if res.skipped:
-            raise RuntimeError(
-                f"failed to fetch categories root after {args.retries} attempts: {categories_url}"
-            )
 
         categories_root = json.loads(categories_out.read_text(encoding="utf-8"))
         cat_ids = _iter_second_level_category_ids(categories_root)
@@ -324,6 +307,7 @@ async def main() -> int:
         all_product_ids: set[str] = set()
 
         for cid in cat_ids:
+            await asyncio.sleep(args.delay)
             url = f"{args.base_url}/categories/{cid}"
             out_path = out_dir / _api_rel_to_out_path(f"categories/{cid}")
             res = await _fetch_json(
@@ -335,12 +319,6 @@ async def main() -> int:
             )
             print(_format_fetch_result(res, out_dir))
 
-            if args.delay:
-                await asyncio.sleep(args.delay)
-
-            if res.skipped or res.status_code != 200:
-                continue
-
             payload = json.loads(out_path.read_text(encoding="utf-8"))
             all_product_ids |= _collect_product_ids_from_category_payload(payload)
 
@@ -348,17 +326,14 @@ async def main() -> int:
         if args.max_products and args.max_products > 0:
             product_ids = product_ids[: args.max_products]
 
-        product_index_path = out_dir / "product_ids.json"
-        _write_json(
-            product_index_path,
-            {
-                "count": len(product_ids),
-                "product_ids": product_ids,
-            },
-            skip_unchanged=args.skip_unchanged,
-        )
+        if not product_ids:
+            raise ValueError("no products found; refusing to publish an empty catalog")
+
+        completed = 0
 
         async def fetch_one(pid: str) -> FetchResult:
+            nonlocal completed
+            await asyncio.sleep(args.delay)
             url = f"{args.base_url}/products/{pid}"
             out_path = out_dir / _api_rel_to_out_path(f"products/{pid}")
             r = await _fetch_json(
@@ -368,18 +343,20 @@ async def main() -> int:
                 retries=args.retries,
                 skip_unchanged=args.skip_unchanged,
             )
-            if args.delay:
-                await asyncio.sleep(args.delay)
+            completed += 1
+            if completed % 25 == 0 or completed == len(product_ids):
+                print(f"products fetched: {completed}/{len(product_ids)}", flush=True)
             return r
 
-        coros = [fetch_one(pid) for pid in product_ids]
-        results: list[FetchResult] = []
-        if coros:
-            results = await _bounded_gather(args.concurrency, coros)
+        results = await _bounded_gather(args.concurrency, product_ids, fetch_one)
 
         wrote = sum(1 for r in results if r.wrote)
-        skipped = sum(1 for r in results if r.skipped)
-        print(f"products fetched: {len(results)}, wrote: {wrote}, skipped: {skipped}")
+        _write_json(
+            out_dir / "product_ids.json",
+            {"count": len(product_ids), "product_ids": product_ids},
+            skip_unchanged=args.skip_unchanged,
+        )
+        print(f"products fetched: {len(results)}, wrote: {wrote}")
 
     return 0
 
