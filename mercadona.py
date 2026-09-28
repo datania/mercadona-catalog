@@ -166,6 +166,7 @@ async def _fetch_json(
     *,
     retries: int,
     skip_unchanged: bool,
+    allow_not_found: bool = False,
 ) -> FetchResult:
     last_exc: Exception | None = None
 
@@ -182,6 +183,8 @@ async def _fetch_json(
             ) from last_exc
 
         status = resp.status_code
+        if status == 404 and allow_not_found:
+            return FetchResult(url=url, path=out_path, status_code=status, wrote=False)
         if status >= 500 and attempt < retries:
             await asyncio.sleep(_retry_backoff_seconds(attempt))
             continue
@@ -263,6 +266,8 @@ async def _bounded_gather[T, R](
 
 def _format_fetch_result(res: FetchResult, out_dir: Path) -> str:
     base = f"[{res.status_code}] {res.path.relative_to(out_dir)}"
+    if res.status_code == 404:
+        return f"{base} (skipped: not found)"
     if not res.wrote:
         return f"{base} (unchanged)"
     return base
@@ -342,21 +347,35 @@ async def main() -> int:
                 out_path,
                 retries=args.retries,
                 skip_unchanged=args.skip_unchanged,
+                allow_not_found=True,
             )
+            if r.status_code == 404:
+                print(_format_fetch_result(r, out_dir), flush=True)
             completed += 1
             if completed % 25 == 0 or completed == len(product_ids):
-                print(f"products fetched: {completed}/{len(product_ids)}", flush=True)
+                print(f"products processed: {completed}/{len(product_ids)}", flush=True)
             return r
 
         results = await _bounded_gather(args.concurrency, product_ids, fetch_one)
 
-        wrote = sum(1 for r in results if r.wrote)
+        missing = [r for r in results if r.status_code == 404]
+        fetched = [r for r in results if r.status_code != 404]
+        if not fetched:
+            raise ValueError("no products fetched; refusing to publish an empty catalog")
+
+        # The index builder globs products/*.json, so remove stale 404 files.
+        for r in missing:
+            r.path.unlink(missing_ok=True)
+        product_ids = sorted(r.path.stem for r in fetched)
+        wrote = sum(1 for r in fetched if r.wrote)
         _write_json(
             out_dir / "product_ids.json",
             {"count": len(product_ids), "product_ids": product_ids},
             skip_unchanged=args.skip_unchanged,
         )
-        print(f"products fetched: {len(results)}, wrote: {wrote}")
+        print(
+            f"products fetched: {len(fetched)}, skipped (404): {len(missing)}, wrote: {wrote}"
+        )
 
     return 0
 
