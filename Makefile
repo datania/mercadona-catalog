@@ -1,10 +1,11 @@
-.PHONY: data index upload clean help
+.PHONY: data index upload upload-check clean help
 
 help:
 	@echo "Targets:"
 	@echo "  data   - Download Mercadona catalog JSON into data/"
 	@echo "  index  - Build index.html from data/products"
 	@echo "  upload - Upload data/ to Hugging Face dataset datania/mercadona-catalog"
+	@echo "  upload-check - Check the locked Hugging Face upload CLI without uploading"
 	@echo "  clean  - Remove data/"
 
 .uv:
@@ -16,12 +17,13 @@ data: .uv
 index: .uv
 	uv run --script embed_products.py --products-dir data/products --out index.html
 
-upload:
-	uvx --from "huggingface_hub[hf_xet]" hf upload-large-folder \
-		--token=${HUGGINGFACE_TOKEN} \
+upload-check: .uv
+	uv run --locked --group upload hf upload --help > /dev/null
+
+upload: .uv
+	HF_TOKEN="$${HUGGINGFACE_TOKEN}" uv run --locked --group upload hf upload \
 		--repo-type dataset \
-		--num-workers 4 \
-		datania/mercadona-catalog data/
+		datania/mercadona-catalog data/ .
 
 clean:
 	rm -rf data/
